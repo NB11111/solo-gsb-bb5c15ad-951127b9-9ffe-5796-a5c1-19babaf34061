@@ -269,6 +269,20 @@ table.matrix th {
 }
 .tie-inline:hover:not(:disabled) { background: rgba(245, 197, 66, 0.12); }
 
+/* ---------- 最少改判方案 ---------- */
+#fix-panel {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--card-border);
+}
+.fix-desc { margin: 0 0 0.7rem; }
+.fix-desc strong { color: var(--yellow); }
+.fix-chip {
+  color: var(--yellow);
+  border-color: rgba(245, 197, 66, 0.4);
+}
+#apply-fix-btn { margin-top: 0.9rem; }
+
 /* ---------- 提示条 ---------- */
 #toast {
   position: fixed;

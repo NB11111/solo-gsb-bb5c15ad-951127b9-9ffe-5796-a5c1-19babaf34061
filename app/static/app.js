@@ -204,6 +204,27 @@ function renderConflict() {
     $("#revise-a").textContent = `「${selectedPair.a}」胜`;
     $("#revise-b").textContent = `「${selectedPair.b}」胜`;
   }
+
+  // 最少改判方案：受影响组合预览 + 一键应用
+  const fix = conflict.fix;
+  const fixPanel = $("#fix-panel");
+  if (fix && fix.pairs.length) {
+    fixPanel.classList.remove("hidden");
+    $("#fix-count").textContent = fix.changes;
+    const fixBox = $("#fix-pairs");
+    fixBox.innerHTML = "";
+    for (const p of fix.pairs) {
+      const winner = p.result === "a" ? p.a : p.b;
+      const loser = p.result === "a" ? p.b : p.a;
+      const chip = document.createElement("span");
+      chip.className = "chip fix-chip";
+      chip.textContent = `${winner} 胜 ${loser} → 平局`;
+      fixBox.appendChild(chip);
+    }
+    $("#apply-fix-btn").textContent = `✨ 一键应用（改判 ${fix.changes} 项为平局）`;
+  } else {
+    fixPanel.classList.add("hidden");
+  }
 }
 
 function selectConflictPair(pair) {
@@ -271,6 +292,24 @@ async function revise(result) {
     selectedPair = null;
     render();
     toast("判定已更新，排名与冲突已重算");
+  } catch (e) {
+    toast(e.message);
+    await refresh();
+  } finally {
+    busy = false;
+  }
+}
+
+async function applyFix() {
+  if (busy || !state || !state.conflict || !state.conflict.fix) return;
+  const n = state.conflict.fix.changes;
+  if (!confirm(`确定按最少改判方案将 ${n} 个组合改判为平局吗？\n批量更新在单个事务中完成，判断记录、进度与撤销顺序均不受影响。`)) return;
+  busy = true;
+  try {
+    state = await api(`/api/sessions/${state.session_id}/apply-fix`, { method: "POST" });
+    selectedPair = null;
+    render();
+    toast("已按最少改判方案批量改判，排名与冲突已重算");
   } catch (e) {
     toast(e.message);
     await refresh();
@@ -350,6 +389,7 @@ $("#revise-cancel").addEventListener("click", () => {
   selectedPair = null;
   renderConflict();
 });
+$("#apply-fix-btn").addEventListener("click", applyFix);
 
 document.addEventListener("keydown", (e) => {
   if ($("#review-view").classList.contains("hidden")) return;

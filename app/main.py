@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .conflict import shortest_cycle
+from .fixplan import min_tie_fix
 from .schulze import rank_groups, strongest_paths
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -141,7 +142,13 @@ def load_state(conn: sqlite3.Connection, session_id: str) -> dict:
             loser = cycle[(i + 1) % len(cycle)]
             a, b = (winner, loser) if order[winner] < order[loser] else (loser, winner)
             edges.append({"a": a, "b": b, "result": "a" if winner == a else "b"})
-        conflict = {"cycle": cycle, "edges": edges}
+        # 最少改判方案：把最少数量的严格胜负组合改判为平局即可消除全部有向环
+        changes, pairs = min_tie_fix(candidates, history)
+        conflict = {
+            "cycle": cycle,
+            "edges": edges,
+            "fix": {"changes": changes, "pairs": pairs},
+        }
 
     return {
         "session_id": session_id,
@@ -243,6 +250,38 @@ def revise(sid: str, payload: JudgmentCreate):
         if cur.rowcount == 0:
             raise HTTPException(409, "该组合尚未判定，请通过正常流程完成首次比较")
         conn.commit()
+        return load_state(conn, sid)
+    finally:
+        conn.close()
+
+
+@app.post("/api/sessions/{sid}/apply-fix")
+def apply_fix(sid: str):
+    """最少改判方案一键应用：把方案中的组合批量改判为平局。
+
+    方案由后端按当前判断记录重新计算（与状态接口中的建议一致），
+    全部 UPDATE 在单个事务中提交；行 id、记录条数、进度统计与撤销
+    顺序均保持不变，返回状态中已包含重算后的排名与冲突。
+    """
+    conn = get_conn()
+    try:
+        state = load_state(conn, sid)
+        conflict = state["conflict"]
+        if conflict is None or not conflict["fix"]["pairs"]:
+            raise HTTPException(409, "当前没有循环冲突，无需改判")
+        try:
+            for p in conflict["fix"]["pairs"]:
+                cur = conn.execute(
+                    "UPDATE judgments SET result = 'tie' "
+                    "WHERE session_id = ? AND a = ? AND b = ?",
+                    (sid, p["a"], p["b"]),
+                )
+                if cur.rowcount == 0:
+                    raise HTTPException(409, "判断记录已变化，方案失效，请刷新后重试")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return load_state(conn, sid)
     finally:
         conn.close()
