@@ -67,6 +67,26 @@
             <button id="revise-cancel">取消</button>
           </div>
         </div>
+        <div id="suggestion-panel">
+          <div class="suggestion-head">
+            <span class="suggestion-badge">最少改判方案</span>
+            <span id="suggestion-count" class="muted"></span>
+          </div>
+          <p class="muted">
+            将以下 <strong id="suggestion-num"></strong> 个组合改为平局，
+            即可用最少的改动消除全部循环（平局与未比较组合不参与计算）：
+          </p>
+          <div id="suggestion-pairs" class="chips"></div>
+          <div id="suggestion-preview" class="suggestion-preview">
+            <p class="suggestion-preview-title">应用后受影响结果：</p>
+            <div id="suggestion-affected"></div>
+            <p class="suggestion-preview-title">应用后排名预览：</p>
+            <div id="suggestion-ranking"></div>
+          </div>
+          <div class="revise-actions">
+            <button id="suggestion-apply" class="primary">✓ 确认并批量改为平局</button>
+          </div>
+        </div>
       </div>
 
       <div class="grid">

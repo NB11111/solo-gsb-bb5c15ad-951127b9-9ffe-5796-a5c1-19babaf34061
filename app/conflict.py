@@ -78,3 +78,85 @@ def shortest_cycle(candidates: list[str], judgments: list[dict]) -> list[str] | 
     if best is None:
         return None
     return [candidates[i] for i in best]
+
+
+def _edge_set_less(a: int, b: int) -> bool:
+    """两个等大小的边号位掩码：按升序编号序列做字典序比较，a < b 时为真。
+
+    即取两者对称差中编号最小的边，它属于 a 则 a 的序列更小。
+    """
+    xor = a ^ b
+    return bool(xor) and bool(a & (xor & -xor))
+
+
+def minimum_tie_resolution(
+    candidates: list[str], judgments: list[dict]
+) -> list[tuple[str, str]]:
+    """「最少改判方案」：把最少多少条严格胜负判断改为平局，可使胜负图无环。
+
+    把一条严格胜负边改成平局等价于从有向图中删除该边，因此问题即严格胜负
+    有向图上的**最小反馈弧集**。平局与未比较组合不成边，不参与计算。
+
+    利用等价刻画：最小反馈弧集的边数 = 所有顶点排列中「逆向边」数的最小值
+    （删除排列中的逆向边后即为无环图；任一无环剩余图也都存在使其边全向前的
+    拓扑排列）。n ≤ 12，用子集 DP 精确求解，复杂度 O(2^n · n^2)：
+    dp[S] = 排列好子集 S 所需删除的最少边数；把 v 放在 S 最后时，v 指向
+    S\\{v} 中顶点的边全部为逆向边。
+
+    多个最优方案时的稳定选择：严格边按**判断记录顺序**（judgments 已按记录
+    id 升序传入）依次编号，取编号集合字典序最小的方案——即在同样最少的改动
+    数下，优先改判更早记录的组合。该比较在 DP 的每个子集状态上局部保留，
+    故求得的全局方案仍是字典序最小者。
+
+    返回需要改判的存储组合 (a, b) 列表（按判断记录顺序排列）；
+    无环（不存在冲突）时返回空列表。
+    """
+    n = len(candidates)
+    idx = {name: i for i, name in enumerate(candidates)}
+
+    # 严格胜负边：顶点出边掩码 + 边在记录顺序下的优先级位号
+    out_vertices = [0] * n
+    edge_bit = [[0] * n for _ in range(n)]  # edge_bit[tail][head] = 1 << priority
+    pairs: list[tuple[str, str]] = []  # priority -> 存储组合 (a, b)
+    priority = 0
+    for j in judgments:
+        if j["result"] == "tie":
+            continue  # 平局不成边，也不占用编号
+        x, y = idx[j["a"]], idx[j["b"]]
+        tail, head = (x, y) if j["result"] == "a" else (y, x)
+        if edge_bit[tail][head]:
+            continue  # 正常数据下同组合只有一条记录，防御性跳过
+        out_vertices[tail] |= 1 << head
+        edge_bit[tail][head] = 1 << priority
+        pairs.append((j["a"], j["b"]))
+        priority += 1
+
+    total = 1 << n
+    dp_cost = [0] * total
+    dp_edges = [0] * total
+    for s in range(1, total):
+        best_cost = n * n + 1
+        best_edges = 0
+        rest = s
+        while rest:
+            bit_v = rest & -rest
+            v = bit_v.bit_length() - 1
+            prev = s ^ bit_v
+            backward_v = out_vertices[v] & prev  # v 指向已排列顶点的逆向边
+            cand_cost = dp_cost[prev] + backward_v.bit_count()
+            cand_edges = dp_edges[prev]
+            heads = backward_v
+            while heads:
+                bit_u = heads & -heads
+                u = bit_u.bit_length() - 1
+                cand_edges |= edge_bit[v][u]
+                heads ^= bit_u
+            if cand_cost < best_cost or (
+                cand_cost == best_cost and _edge_set_less(cand_edges, best_edges)
+            ):
+                best_cost, best_edges = cand_cost, cand_edges
+            rest ^= bit_v
+        dp_cost[s], dp_edges[s] = best_cost, best_edges
+
+    chosen = dp_edges[total - 1]
+    return [pair for p, pair in enumerate(pairs) if chosen & (1 << p)]

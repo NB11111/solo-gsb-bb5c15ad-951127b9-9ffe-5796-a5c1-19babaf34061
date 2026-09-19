@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .conflict import shortest_cycle
+from .conflict import minimum_tie_resolution, shortest_cycle
 from .schulze import rank_groups, strongest_paths
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -84,6 +84,11 @@ class JudgmentCreate(BaseModel):
     result: Literal["a", "b", "tie"]
 
 
+class SuggestionApply(BaseModel):
+    # 可选：客户端回传待改判组合用于一致性校验；缺省时服务器直接采用当前建议
+    pairs: list[dict[str, str]] | None = None
+
+
 # ---------- 状态组装 ----------
 
 def load_state(conn: sqlite3.Connection, session_id: str) -> dict:
@@ -143,6 +148,39 @@ def load_state(conn: sqlite3.Connection, session_id: str) -> dict:
             edges.append({"a": a, "b": b, "result": "a" if winner == a else "b"})
         conflict = {"cycle": cycle, "edges": edges}
 
+    # 最少改判方案：把最少数量的严格胜负组合改为平局即可消除全部有向环。
+    # 无冲突时不生成建议；平局与未比较组合不参与计算。
+    suggestion = None
+    if conflict is not None:
+        change_pairs = minimum_tie_resolution(candidates, history)
+        change_set = {(a, b) for a, b in change_pairs}
+        affected = []
+        preview_history = []
+        for h in history:
+            a, b, result = h["a"], h["b"], h["result"]
+            if (a, b) in change_set:
+                affected.append(
+                    {
+                        "a": a,
+                        "b": b,
+                        "from": result,  # 严格胜负（"a"/"b"，相对存储顺序的 a）
+                        "to": "tie",
+                    }
+                )
+                preview_history.append({"a": a, "b": b, "result": "tie"})
+            else:
+                preview_history.append({"a": a, "b": b, "result": result})
+        preview_groups = rank_groups(
+            candidates, strongest_paths(candidates, preview_history)
+        )
+        suggestion = {
+            # 组合按判断记录顺序排列，stable 选择结果对前端确定可见
+            "pairs": [{"a": a, "b": b} for a, b in change_pairs],
+            "change_count": len(change_pairs),
+            "affected": affected,
+            "preview_ranking": preview_groups,
+        }
+
     return {
         "session_id": session_id,
         "candidates": candidates,
@@ -152,6 +190,7 @@ def load_state(conn: sqlite3.Connection, session_id: str) -> dict:
         "ranking": groups,
         "matrix": matrix,
         "conflict": conflict,
+        "suggestion": suggestion,
         "can_undo": bool(history),
     }
 
@@ -244,6 +283,51 @@ def revise(sid: str, payload: JudgmentCreate):
             raise HTTPException(409, "该组合尚未判定，请通过正常流程完成首次比较")
         conn.commit()
         return load_state(conn, sid)
+    finally:
+        conn.close()
+
+
+@app.post("/api/sessions/{sid}/resolve-conflicts")
+def resolve_conflicts(sid: str, payload: SuggestionApply | None = None):
+    """一次确认后批量应用「最少改判方案」：把建议组合全部改为平局。
+
+    全部 UPDATE 与后续状态读取在**单个 SQLite 事务**中完成，任一更新未命中或
+    发生异常即整体回滚。UPDATE 不新增/删除判断记录，因此判断记录 id、
+    进度统计（已完成数/总数）与撤销顺序均保持不变。提交后重算排名与冲突，
+    返回完整状态（成功时 conflict/suggestion 均应为空）。
+    """
+    conn = get_conn()
+    try:
+        with conn:  # 单事务：无异常提交，异常自动回滚
+            state = load_state(conn, sid)
+            suggestion = state["suggestion"]
+            if suggestion is None:
+                raise HTTPException(409, "当前不存在循环冲突，无需应用改判方案")
+
+            expected = [(p["a"], p["b"]) for p in suggestion["pairs"]]
+            if payload is not None and payload.pairs is not None:
+                submitted = []
+                for p in payload.pairs:
+                    if set(p.keys()) != {"a", "b"}:
+                        raise HTTPException(422, "组合字段须为 a、b")
+                    submitted.append((p["a"], p["b"]))
+                if submitted != expected:
+                    raise HTTPException(
+                        409, "建议方案已过期或与当前冲突不符，请刷新后重试"
+                    )
+
+            for a, b in expected:
+                # 仅把严格胜负记录改为平局；平局行 rowcount 仍为 1 但语义上不该出现
+                cur = conn.execute(
+                    "UPDATE judgments SET result = 'tie' "
+                    "WHERE session_id = ? AND a = ? AND b = ? AND result != 'tie'",
+                    (sid, a, b),
+                )
+                if cur.rowcount != 1:
+                    raise HTTPException(
+                        409, f"组合「{a} vs {b}」当前不是严格胜负判定，方案已失效"
+                    )
+            return load_state(conn, sid)
     finally:
         conn.close()
 

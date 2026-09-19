@@ -64,22 +64,7 @@ function render() {
 }
 
 function renderRanking() {
-  const box = $("#ranking");
-  box.innerHTML = "";
-  let rank = 1; // 竞争排名：并列后跳名次
-  for (const group of state.ranking) {
-    const row = document.createElement("div");
-    row.className = "rank-row" + (group.length > 1 ? " tied" : "");
-    const badge = document.createElement("span");
-    badge.className = "rank-badge";
-    badge.textContent = `第 ${rank} 名`;
-    const names = document.createElement("span");
-    names.className = "rank-names";
-    names.textContent = group.join(" ＝ ");
-    row.append(badge, names);
-    box.appendChild(row);
-    rank += group.length;
-  }
+  renderRankingInto($("#ranking"), state.ranking);
 }
 
 function renderPending() {
@@ -116,10 +101,25 @@ function conflictCells() {
   return cells;
 }
 
+function suggestionCells() {
+  // 最少改判方案中各组合对应的两个矩阵格
+  const cells = new Set();
+  if (state.suggestion) {
+    const pos = new Map(state.candidates.map((name, i) => [name, i]));
+    for (const p of state.suggestion.pairs) {
+      const i = pos.get(p.a);
+      const j = pos.get(p.b);
+      cells.add(`${i}:${j}`).add(`${j}:${i}`);
+    }
+  }
+  return cells;
+}
+
 function renderMatrix() {
   const wrap = $("#matrix-wrap");
   wrap.innerHTML = "";
   const conflicts = conflictCells();
+  const suggested = suggestionCells();
   const table = document.createElement("table");
   table.className = "matrix";
 
@@ -146,9 +146,19 @@ function renderMatrix() {
       const td = document.createElement("td");
       td.className = `cell-${cell}`;
       td.textContent = SYMBOLS[cell];
-      if (conflicts.has(`${i}:${j}`)) {
+      const key = `${i}:${j}`;
+      if (conflicts.has(key)) {
         td.classList.add("cell-conflict");
         td.title = "循环冲突组合，点击重新判定";
+        td.addEventListener("click", () => {
+          selectConflictPair({
+            a: state.candidates[Math.min(i, j)],
+            b: state.candidates[Math.max(i, j)],
+          });
+        });
+      } else if (suggested.has(key)) {
+        td.classList.add("cell-suggestion");
+        td.title = "最少改判方案：点击可手动重新判定";
         td.addEventListener("click", () => {
           selectConflictPair({
             a: state.candidates[Math.min(i, j)],
@@ -177,8 +187,13 @@ function renderConflict() {
   card.classList.remove("hidden");
   $("#conflict-path").textContent = [...conflict.cycle, conflict.cycle[0]].join(" → ");
 
-  // 选中组合已不在当前环上（如经撤销/重判）时收起面板
-  if (selectedPair && !conflict.edges.some((e) => e.a === selectedPair.a && e.b === selectedPair.b)) {
+  // 选中组合已不在当前环上、也不在改判建议中（如经撤销/重判）时收起面板
+  if (
+    selectedPair &&
+    !conflict.edges.some((e) => e.a === selectedPair.a && e.b === selectedPair.b) &&
+    !(state.suggestion &&
+      state.suggestion.pairs.some((p) => p.a === selectedPair.a && p.b === selectedPair.b))
+  ) {
     selectedPair = null;
   }
 
@@ -204,6 +219,67 @@ function renderConflict() {
     $("#revise-a").textContent = `「${selectedPair.a}」胜`;
     $("#revise-b").textContent = `「${selectedPair.b}」胜`;
   }
+
+  renderSuggestion();
+}
+
+function renderRankingInto(box, groups) {
+  box.innerHTML = "";
+  let rank = 1; // 竞争排名：并列后跳名次
+  for (const group of groups) {
+    const row = document.createElement("div");
+    row.className = "rank-row" + (group.length > 1 ? " tied" : "");
+    const badge = document.createElement("span");
+    badge.className = "rank-badge";
+    badge.textContent = `第 ${rank} 名`;
+    const names = document.createElement("span");
+    names.className = "rank-names";
+    names.textContent = group.join(" ＝ ");
+    row.append(badge, names);
+    box.appendChild(row);
+    rank += group.length;
+  }
+}
+
+function renderSuggestion() {
+  const panel = $("#suggestion-panel");
+  const s = state.suggestion;
+  if (!s) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  $("#suggestion-count").textContent = `共 ${s.change_count} 个组合`;
+  $("#suggestion-num").textContent = s.change_count;
+
+  const box = $("#suggestion-pairs");
+  box.innerHTML = "";
+  for (const p of s.pairs) {
+    const chip = document.createElement("button");
+    chip.className =
+      "chip suggestion-chip" +
+      (selectedPair && selectedPair.a === p.a && selectedPair.b === p.b ? " selected" : "");
+    chip.textContent = `${p.a} ＝ ${p.b}`;
+    chip.title = "点击可手动重新判定该组合";
+    chip.addEventListener("click", () => selectConflictPair(p));
+    box.appendChild(chip);
+  }
+
+  const affected = $("#suggestion-affected");
+  affected.innerHTML = "";
+  for (const item of s.affected) {
+    const row = document.createElement("div");
+    row.className = "affected-row";
+    const winner = item.from === "a" ? item.a : item.b;
+    const loser = item.from === "a" ? item.b : item.a;
+    row.innerHTML =
+      `<span class="affected-from">${winner} 胜 ${loser}</span>` +
+      `<span class="affected-arrow">→</span>` +
+      `<span class="affected-to">${item.a} ＝ ${item.b}（平局）</span>`;
+    affected.appendChild(row);
+  }
+
+  renderRankingInto($("#suggestion-ranking"), s.preview_ranking);
 }
 
 function selectConflictPair(pair) {
@@ -279,8 +355,33 @@ async function revise(result) {
   }
 }
 
-async function resetRound() {
-  if (busy || !state) return;
+async function applySuggestion() {
+  if (busy || !state || !state.suggestion) return;
+  const n = state.suggestion.change_count;
+  if (!confirm(`确认把这 ${n} 个组合批量改为平局吗？\n进度与撤销顺序保持不变，排名与冲突将立即重算。`)) {
+    return;
+  }
+  busy = true;
+  $("#suggestion-apply").disabled = true;
+  try {
+    state = await api(`/api/sessions/${state.session_id}/resolve-conflicts`, {
+      method: "POST",
+      body: JSON.stringify({
+        pairs: state.suggestion.pairs.map((p) => ({ a: p.a, b: p.b })),
+      }),
+    });
+    selectedPair = null;
+    render();
+    toast(state.conflict ? "已应用方案，仍存在其他循环冲突" : "已批量改判，全部循环冲突已消除");
+  } catch (e) {
+    toast(e.message);
+    await refresh();
+  } finally {
+    busy = false;
+  }
+}
+
+async function resetRound() {  if (busy || !state) return;
   if (!confirm("确定要清空本轮全部判断记录吗？")) return;
   busy = true;
   try {
@@ -350,6 +451,7 @@ $("#revise-cancel").addEventListener("click", () => {
   selectedPair = null;
   renderConflict();
 });
+$("#suggestion-apply").addEventListener("click", applySuggestion);
 
 document.addEventListener("keydown", (e) => {
   if ($("#review-view").classList.contains("hidden")) return;
